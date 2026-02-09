@@ -1,4 +1,17 @@
 <?php
+/**
+ * Giveaway Bot (Webhook) - SINGLE FILE index.php
+ * - 2 Force-Join channels
+ * - Users can join giveaway only with admin-generated unique codes (single-use)
+ * - Admin panel: Create Codes, Participants Count, Choose Winners, Send Prize Codes, Reset Giveaway
+ * - NO winner announcements in any channel/group (removed)
+ *
+ * Required ENV:
+ * BOT_TOKEN, ADMIN_ID
+ * DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+ * FORCE_JOIN_1, FORCE_JOIN_2 (use @channel or -100...)
+ */
+
 // ===================== CONFIG (ENV) =====================
 $BOT_TOKEN = getenv("BOT_TOKEN");
 $ADMIN_ID  = intval(getenv("ADMIN_ID"));
@@ -11,9 +24,6 @@ $DB_PASS = getenv("DB_PASS");
 
 $FORCE_JOIN_1 = trim(getenv("FORCE_JOIN_1") ?: "");
 $FORCE_JOIN_2 = trim(getenv("FORCE_JOIN_2") ?: "");
-
-// Winner announcement channel (optional) e.g. @MyChannel or -100xxxx
-$WINNER_ANNOUNCE_CHANNEL = trim(getenv("WINNER_ANNOUNCE_CHANNEL") ?: "");
 
 // ===================== BASIC CHECKS =====================
 if (!$BOT_TOKEN || !$ADMIN_ID || !$DB_HOST || !$DB_USER || !$DB_PASS) {
@@ -43,8 +53,8 @@ function tg($method, $data = []) {
   curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
   curl_setopt($ch, CURLOPT_POST, true);
   curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 6);
-  curl_setopt($ch, CURLOPT_TIMEOUT, 12);
+  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 8);
+  curl_setopt($ch, CURLOPT_TIMEOUT, 18);
   $res = curl_exec($ch);
   curl_close($ch);
   return $res ? json_decode($res, true) : null;
@@ -82,6 +92,7 @@ function isJoined($channel, $user_id) {
   return in_array($st, ["member", "administrator", "creator"]);
 }
 
+// ===================== KEYBOARDS =====================
 function mainMenuKeyboard($isAdmin = false) {
   $kb = [
     [["text"=>"🎁 Participate in Giveaway"]],
@@ -162,9 +173,7 @@ function randomCode($len = 10) {
   $bytes = random_bytes($len);
   $out = "";
   $n = strlen($alphabet);
-  for ($i=0; $i<$len; $i++) {
-    $out .= $alphabet[ord($bytes[$i]) % $n];
-  }
+  for ($i=0; $i<$len; $i++) $out .= $alphabet[ord($bytes[$i]) % $n];
   return $out;
 }
 
@@ -232,7 +241,6 @@ function pickWinners($giveaway_id, $count) {
   $pdo->beginTransaction();
   try {
     $pdo->prepare("DELETE FROM giveaway_winners WHERE giveaway_id=:gid")->execute([":gid"=>$giveaway_id]);
-
     $ins = $pdo->prepare("INSERT INTO giveaway_winners (giveaway_id, tg_id, tg_name) VALUES (:gid, :tg, :nm)");
     foreach ($picked as $p) {
       $ins->execute([":gid"=>$giveaway_id, ":tg"=>$p["tg_id"], ":nm"=>$p["tg_name"]]);
@@ -269,6 +277,7 @@ function resetGiveaway() {
   $pdo->exec("INSERT INTO giveaways (status) VALUES ('active')");
 }
 
+// ===================== JOIN CHECK FLOW =====================
 function requireJoinOrPrompt($chat_id, $tg_id, $isAdmin) {
   global $FORCE_JOIN_1, $FORCE_JOIN_2;
 
@@ -276,6 +285,7 @@ function requireJoinOrPrompt($chat_id, $tg_id, $isAdmin) {
   $ok2 = isJoined($FORCE_JOIN_2, $tg_id);
 
   if ($ok1 && $ok2) {
+    // IMPORTANT: do not always spam menu - just confirm once when /start or check_join
     sendMessage($chat_id, "✅ Verified!\n\nUse menu to participate giveaway.", mainMenuKeyboard($isAdmin));
     return true;
   }
@@ -288,42 +298,20 @@ function requireJoinOrPrompt($chat_id, $tg_id, $isAdmin) {
   return false;
 }
 
-// Winner announcement: NAME ONLY (no IDs)
-function announceWinnersToChannel($giveaway_id, $picked) {
-  global $WINNER_ANNOUNCE_CHANNEL;
-  if (!$WINNER_ANNOUNCE_CHANNEL) return;
-
-  $count = count($picked);
-  $text = "🎉 <b>Giveaway Winners Announced</b>\n\n";
-
-  $i = 1;
-  foreach ($picked as $p) {
-    $name = trim($p["tg_name"] ?? "");
-    if ($name === "") $name = "Winner #{$i}";
-    $name = htmlspecialchars($name);
-
-    $text .= "{$i}) {$name}\n";
-    $i++;
-    if ($i > 200) break;
-  }
-
-  $text .= "\n✅ Total winners: <b>{$count}</b>";
-  sendMessage($WINNER_ANNOUNCE_CHANNEL, $text);
-}
-
 // ===================== UPDATE HANDLER =====================
 $update = json_decode(file_get_contents("php://input"), true);
 if (!$update) { echo "ok"; exit; }
 
-$message = $update["message"] ?? null;
+$message  = $update["message"] ?? null;
 $callback = $update["callback_query"] ?? null;
 
+// ---- CALLBACKS ----
 if ($callback) {
-  $cb_id = $callback["id"];
-  $from = $callback["from"];
-  $tg_id = intval($from["id"]);
-  $chat_id = intval($callback["message"]["chat"]["id"]);
-  $data = $callback["data"] ?? "";
+  $cb_id  = $callback["id"];
+  $from   = $callback["from"];
+  $tg_id  = intval($from["id"]);
+  $chat_id= intval($callback["message"]["chat"]["id"]);
+  $data   = $callback["data"] ?? "";
 
   $isAdmin = ($tg_id === $GLOBALS["ADMIN_ID"]);
 
@@ -337,34 +325,39 @@ if ($callback) {
   echo "ok"; exit;
 }
 
+// ---- MESSAGES ----
 if ($message) {
   $chat_id = intval($message["chat"]["id"]);
-  $from = $message["from"];
-  $tg_id = intval($from["id"]);
-  $first = trim($from["first_name"] ?? "");
-  $username = trim($from["username"] ?? "");
+  $from    = $message["from"];
+  $tg_id   = intval($from["id"]);
+  $first   = trim($from["first_name"] ?? "");
+  $username= trim($from["username"] ?? "");
   $tg_name = trim($first . ($username ? " (@$username)" : ""));
 
-  $text = trim($message["text"] ?? "");
+  $text    = trim($message["text"] ?? "");
   $isAdmin = ($tg_id === $ADMIN_ID);
 
+  // /start
   if ($text === "/start") {
     requireJoinOrPrompt($chat_id, $tg_id, $isAdmin);
     echo "ok"; exit;
   }
 
+  // Admin Panel open
   if ($isAdmin && $text === "🛠 Admin Panel") {
     clearState($tg_id);
     sendMessage($chat_id, "🛠 <b>Admin Panel</b>", adminKeyboard());
     echo "ok"; exit;
   }
 
+  // Back
   if ($text === "⬅️ Back") {
     clearState($tg_id);
-    sendMessage($chat_id, "Main menu ✅", mainMenuKeyboard($isAdmin));
+    sendMessage($chat_id, "✅ Main menu", mainMenuKeyboard($isAdmin));
     echo "ok"; exit;
   }
 
+  // Participate
   if ($text === "🎁 Participate in Giveaway") {
     if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin)) { echo "ok"; exit; }
     setState($tg_id, "await_code", "");
@@ -421,6 +414,7 @@ if ($message) {
   $st = getState($tg_id);
   $state = $st["state"];
 
+  // User enters code
   if ($state === "await_code") {
     if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin)) { echo "ok"; exit; }
 
@@ -436,6 +430,7 @@ if ($message) {
     echo "ok"; exit;
   }
 
+  // Admin enters number of codes to create
   if ($isAdmin && $state === "admin_create_codes") {
     $gid = intval($st["payload"]);
     $num = intval(preg_replace("/[^0-9]/", "", $text));
@@ -449,6 +444,7 @@ if ($message) {
     echo "ok"; exit;
   }
 
+  // Admin chooses winners count
   if ($isAdmin && $state === "admin_choose_winners") {
     $gid = intval($st["payload"]);
     $num = intval(preg_replace("/[^0-9]/", "", $text));
@@ -467,31 +463,22 @@ if ($message) {
 
     $picked = $pick["picked"];
 
-    // auto announce to channel (NAME ONLY)
-    announceWinnersToChannel($gid, $picked);
-
-    // admin list (NAME ONLY)
+    // Admin winners list: NAME ONLY (no IDs)
     $out = "🎉 <b>Winners Chosen</b>\n\n";
-    $i=1;
+    $i = 1;
     foreach ($picked as $p) {
       $name = trim($p["tg_name"] ?? "");
       if ($name === "") $name = "Winner #{$i}";
-      $name = htmlspecialchars($name);
-      $out .= "{$i}) {$name}\n";
+      $out .= $i . ") " . htmlspecialchars($name) . "\n";
       $i++;
     }
+    $out .= "\nNow tap: 📨 Send Prize Codes";
 
-    if ($GLOBALS["WINNER_ANNOUNCE_CHANNEL"]) {
-      $out .= "\n📣 Announced in: <code>".htmlspecialchars($GLOBALS["WINNER_ANNOUNCE_CHANNEL"])."</code>";
-    } else {
-      $out .= "\n📣 Winner announce channel not set (ENV WINNER_ANNOUNCE_CHANNEL).";
-    }
-
-    $out .= "\n\nNow tap: 📨 Send Prize Codes";
     sendMessage($chat_id, $out, adminKeyboard());
     echo "ok"; exit;
   }
 
+  // Admin sends prize codes list
   if ($isAdmin && $state === "admin_send_prizes") {
     $gid = intval($st["payload"]);
     $winners = getWinners($gid);
@@ -535,8 +522,7 @@ if ($message) {
     echo "ok"; exit;
   }
 
-  // Default
-  if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin)) { echo "ok"; exit; }
+  // Default fallback (IMPORTANT so bot always replies)
   sendMessage($chat_id, "Use menu to participate giveaway ✅", mainMenuKeyboard($isAdmin));
   echo "ok"; exit;
 }
