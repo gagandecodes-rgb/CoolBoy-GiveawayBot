@@ -1,12 +1,13 @@
 <?php
 /**
- * ✅ Giveaway Bot (Webhook) — SINGLE FILE index.php
+ * Giveaway Bot (Webhook) — SINGLE FILE index.php
  *
  * ✅ 2 Force-Join channels
- * ✅ Users join with admin-generated unique codes (single-use)
+ * ✅ Verified message shows ONLY first time after user joins channels
+ * ✅ Admin creates reusable codes (unlimited uses) that EXPIRE after 1 minute
  * ✅ Code format: 8 chars (5 letters + 3 numbers), shuffled
- * ✅ Code expires after 1 minute
- * ✅ Admin panel: Create Codes (shows codes), Participants Count, Choose Winners (names only),
+ * ✅ User can join giveaway ONCE per giveaway (even if code reusable)
+ * ✅ Admin: Create Codes (shows codes), Participants Count, Choose Winners (names only),
  *    Send Prize Codes, Reset Giveaway
  *
  * REQUIRED ENV:
@@ -129,6 +130,26 @@ function forceJoinMarkup() {
   return ["inline_keyboard" => $buttons];
 }
 
+// ---------------- USER VERIFIED (DB) ----------------
+function userIsVerified($tg_id) {
+  global $pdo;
+  $stmt = $pdo->prepare("SELECT verified FROM users WHERE tg_id=:tg");
+  $stmt->execute([":tg" => $tg_id]);
+  $row = $stmt->fetch();
+  return $row ? (bool)$row["verified"] : false;
+}
+
+function setUserVerified($tg_id) {
+  global $pdo;
+  $stmt = $pdo->prepare("
+    INSERT INTO users (tg_id, verified, verified_at, updated_at)
+    VALUES (:tg, TRUE, now(), now())
+    ON CONFLICT (tg_id) DO UPDATE
+      SET verified=TRUE, verified_at=COALESCE(users.verified_at, now()), updated_at=now()
+  ");
+  $stmt->execute([":tg" => $tg_id]);
+}
+
 // ---------------- STATE (DB) ----------------
 function setState($tg_id, $state, $payload = "") {
   global $pdo;
@@ -163,7 +184,7 @@ function getActiveGiveawayId() {
   return $row ? intval($row["id"]) : null;
 }
 
-// ✅ 8 chars: 5 letters + 3 numbers, shuffled
+// 8 chars: 5 letters + 3 numbers, shuffled
 function randomCode() {
   $letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
   $numbers = "23456789";
@@ -173,10 +194,10 @@ function randomCode() {
   return str_shuffle($code);
 }
 
-// ✅ Create codes and set expires_at = now() + 1 minute (DB time)
+// Create codes that expire after 1 minute (reusable until expiry)
 function createCodes($giveaway_id, $count) {
   global $pdo;
-  $count = max(1, min(200, intval($count))); // keep message size safe
+  $count = max(1, min(200, intval($count)));
   $created = [];
 
   $stmt = $pdo->prepare("
@@ -196,53 +217,46 @@ function createCodes($giveaway_id, $count) {
   return $created;
 }
 
-// ✅ Check expiry + single-use
+// Reusable code: validate not expired; user can join only once per giveaway
 function joinWithCode($tg_id, $tg_name, $code) {
   global $pdo;
   $gid = getActiveGiveawayId();
 
-  $pdo->beginTransaction();
-  try {
-    // lock row
-    $stmt = $pdo->prepare("
-      SELECT id, is_used, expires_at
-      FROM giveaway_codes
-      WHERE giveaway_id=:gid AND code=:c
-      FOR UPDATE
-    ");
-    $stmt->execute([":gid" => $gid, ":c" => $code]);
-    $row = $stmt->fetch();
-
-    if (!$row) { $pdo->rollBack(); return ["ok" => false, "msg" => "❌ Invalid code."]; }
-    if ($row["is_used"]) { $pdo->rollBack(); return ["ok" => false, "msg" => "❌ Code already used."]; }
-
-    // expiry check (DB)
-    $stmt = $pdo->prepare("SELECT (now() > :exp) AS expired");
-    $stmt->execute([":exp" => $row["expires_at"]]);
-    $expired = $stmt->fetch();
-    if (!empty($expired) && !empty($expired["expired"])) {
-      $pdo->rollBack();
-      return ["ok" => false, "msg" => "⏳ Code expired (valid only 1 minute). Ask admin for a new code."];
-    }
-
-    // mark used
-    $stmt = $pdo->prepare("UPDATE giveaway_codes SET is_used=true, used_by=:tg, used_at=now() WHERE id=:id");
-    $stmt->execute([":tg" => $tg_id, ":id" => $row["id"]]);
-
-    // add participant
-    $stmt = $pdo->prepare("
-      INSERT INTO giveaway_participants (giveaway_id, tg_id, tg_name)
-      VALUES (:gid, :tg, :nm)
-      ON CONFLICT (giveaway_id, tg_id) DO NOTHING
-    ");
-    $stmt->execute([":gid" => $gid, ":tg" => $tg_id, ":nm" => $tg_name]);
-
-    $pdo->commit();
-    return ["ok" => true, "msg" => "✅ You are entered in the giveaway!"];
-  } catch (Exception $e) {
-    $pdo->rollBack();
-    return ["ok" => false, "msg" => "❌ Error. Try again."];
+  // If already participant, block
+  $chk = $pdo->prepare("SELECT 1 FROM giveaway_participants WHERE giveaway_id=:gid AND tg_id=:tg LIMIT 1");
+  $chk->execute([":gid" => $gid, ":tg" => $tg_id]);
+  if ($chk->fetch()) {
+    return ["ok" => false, "msg" => "✅ You already joined this giveaway."];
   }
+
+  // Validate code + expiry
+  $stmt = $pdo->prepare("
+    SELECT id, expires_at
+    FROM giveaway_codes
+    WHERE giveaway_id=:gid AND code=:c
+    LIMIT 1
+  ");
+  $stmt->execute([":gid" => $gid, ":c" => $code]);
+  $row = $stmt->fetch();
+
+  if (!$row) return ["ok" => false, "msg" => "❌ Invalid code."];
+
+  // Expired?
+  $expCheck = $pdo->prepare("SELECT (now() > :exp) AS expired");
+  $expCheck->execute([":exp" => $row["expires_at"]]);
+  $ex = $expCheck->fetch();
+  if (!empty($ex) && !empty($ex["expired"])) {
+    return ["ok" => false, "msg" => "⏳ Code expired (valid only 1 minute). Ask admin for a new code."];
+  }
+
+  // Insert participant
+  $ins = $pdo->prepare("
+    INSERT INTO giveaway_participants (giveaway_id, tg_id, tg_name)
+    VALUES (:gid, :tg, :nm)
+  ");
+  $ins->execute([":gid" => $gid, ":tg" => $tg_id, ":nm" => $tg_name]);
+
+  return ["ok" => true, "msg" => "✅ You are entered in the giveaway!"];
 }
 
 function pickWinners($giveaway_id, $count) {
@@ -294,15 +308,24 @@ function resetGiveaway() {
   $pdo->exec("INSERT INTO giveaways (status) VALUES ('active')");
 }
 
-// ---------------- JOIN CHECK ----------------
-function requireJoinOrPrompt($chat_id, $tg_id, $isAdmin) {
+// ---------------- JOIN CHECK (verified message ONLY ONCE) ----------------
+function requireJoinOrPrompt($chat_id, $tg_id, $isAdmin, $sendMenu = false) {
   global $FORCE_JOIN_1, $FORCE_JOIN_2;
 
   $ok1 = isJoined($FORCE_JOIN_1, $tg_id);
   $ok2 = isJoined($FORCE_JOIN_2, $tg_id);
 
   if ($ok1 && $ok2) {
-    sendMessage($chat_id, "✅ Verified!\n\nUse menu to participate giveaway.", mainMenuKeyboard($isAdmin));
+    $already = userIsVerified($tg_id);
+
+    // Only first-time verified message
+    if (!$already) {
+      setUserVerified($tg_id);
+      sendMessage($chat_id, "✅ Verified!\n\nUse menu to participate giveaway.", mainMenuKeyboard($isAdmin));
+    } else if ($sendMenu) {
+      // For /start only: show menu, but no "Verified!" spam
+      sendMessage($chat_id, "Use menu ✅", mainMenuKeyboard($isAdmin));
+    }
     return true;
   }
 
@@ -328,7 +351,7 @@ if ($callback) {
 
   if ($data === "check_join") {
     answerCb($cb_id, "Checking...");
-    requireJoinOrPrompt($chat_id, $tg_id, $isAdmin);
+    requireJoinOrPrompt($chat_id, $tg_id, $isAdmin, true);
     echo "ok"; exit;
   }
 
@@ -348,7 +371,7 @@ if ($message) {
   $isAdmin = ($tg_id === $GLOBALS["ADMIN_ID"]);
 
   if ($text === "/start") {
-    requireJoinOrPrompt($chat_id, $tg_id, $isAdmin);
+    requireJoinOrPrompt($chat_id, $tg_id, $isAdmin, true);
     echo "ok"; exit;
   }
 
@@ -365,9 +388,9 @@ if ($message) {
   }
 
   if ($text === "🎁 Participate in Giveaway") {
-    if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin)) { echo "ok"; exit; }
+    if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin, false)) { echo "ok"; exit; }
     setState($tg_id, "await_code", "");
-    sendMessage($chat_id, "🎁 Enter the <b>unique code</b> to participate in giveaway:\n\n⏳ Code expires in <b>1 minute</b>.");
+    sendMessage($chat_id, "🎁 Enter the <b>unique code</b> to participate in giveaway:\n\n⏳ Code expires in <b>1 minute</b>.\n✅ Same code can be used by many users until expiry.");
     echo "ok"; exit;
   }
 
@@ -375,7 +398,7 @@ if ($message) {
   if ($isAdmin && $text === "➕ Create Codes") {
     $gid = getActiveGiveawayId();
     setState($tg_id, "admin_create_codes", (string)$gid);
-    sendMessage($chat_id, "➕ How many unique codes to create? (1 - 200)\n\n⏳ Each code expires in 1 minute.");
+    sendMessage($chat_id, "➕ How many unique codes to create? (1 - 200)\n\n⏳ Each code expires in 1 minute.\n✅ Same code can be used by many users until expiry.");
     echo "ok"; exit;
   }
 
@@ -409,7 +432,7 @@ if ($message) {
   if ($isAdmin && $text === "🧹 Reset Giveaway") {
     resetGiveaway();
     clearState($tg_id);
-    sendMessage($chat_id, "🧹 Giveaway reset ✅\nNew giveaway started.\nNow create new unique codes.", adminKeyboard());
+    sendMessage($chat_id, "🧹 Giveaway reset ✅\nNew giveaway started.\nNow create new codes.", adminKeyboard());
     echo "ok"; exit;
   }
 
@@ -417,9 +440,8 @@ if ($message) {
   $st = getState($tg_id);
   $state = $st["state"];
 
-  // User enters code
   if ($state === "await_code") {
-    if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin)) { echo "ok"; exit; }
+    if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin, false)) { echo "ok"; exit; }
     $code = strtoupper(preg_replace("/\s+/", "", $text));
 
     if (strlen($code) !== 8) {
@@ -433,7 +455,6 @@ if ($message) {
     echo "ok"; exit;
   }
 
-  // Admin create codes -> show codes
   if ($isAdmin && $state === "admin_create_codes") {
     $gid = intval($st["payload"]);
     $num = intval(preg_replace("/[^0-9]/", "", $text));
@@ -447,13 +468,12 @@ if ($message) {
 
     $msg = "✅ <b>Generated Giveaway Codes</b>\n\n";
     foreach ($codes as $c) $msg .= "<code>{$c}</code>\n";
-    $msg .= "\n⏳ Each code expires in <b>1 minute</b>.\n⚠️ Each code works only once.";
+    $msg .= "\n⏳ Each code expires in <b>1 minute</b>.\n✅ Same code can be used by many users until it expires.";
 
     sendMessage($chat_id, $msg, adminKeyboard());
     echo "ok"; exit;
   }
 
-  // Admin choose winners
   if ($isAdmin && $state === "admin_choose_winners") {
     $gid = intval($st["payload"]);
     $num = intval(preg_replace("/[^0-9]/", "", $text));
@@ -484,7 +504,6 @@ if ($message) {
     echo "ok"; exit;
   }
 
-  // Admin sends prize codes
   if ($isAdmin && $state === "admin_send_prizes") {
     $gid = intval($st["payload"]);
     $winners = getWinners($gid);
@@ -518,12 +537,12 @@ if ($message) {
     clearState($tg_id);
     resetGiveaway();
 
-    sendMessage($chat_id, "📨 Sent prize codes to <b>{$sent}</b> winners ✅\n\n🧹 Giveaway ended and reset.\nNow create new unique codes for next giveaway.", adminKeyboard());
+    sendMessage($chat_id, "📨 Sent prize codes to <b>{$sent}</b> winners ✅\n\n🧹 Giveaway ended and reset.\nNow create new codes for next giveaway.", adminKeyboard());
     echo "ok"; exit;
   }
 
   // Fallback
-  sendMessage($chat_id, "Use menu to participate giveaway ✅", mainMenuKeyboard($isAdmin));
+  sendMessage($chat_id, "Use menu ✅", mainMenuKeyboard($isAdmin));
   echo "ok"; exit;
 }
 
