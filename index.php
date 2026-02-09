@@ -2,15 +2,15 @@
 /**
  * ✅ Giveaway Bot (Webhook) — SINGLE FILE index.php
  *
- * FEATURES:
- * ✅ 2 Force-Join channels (FORCE_JOIN_1, FORCE_JOIN_2)
+ * ✅ 2 Force-Join channels
  * ✅ "✅ Verified!" message shows ONLY FIRST TIME (stored in users table)
  * ✅ Reply keyboard: 🎁 Participate in Giveaway
+ *
  * ✅ Admin-generated codes:
  *    - 8 chars (5 letters + 3 numbers), shuffled
  *    - REUSABLE by unlimited users until expiry
  *    - EXPIRE after 1 minute
- * ✅ User can join giveaway only once per giveaway
+ * ✅ User can join giveaway only ONCE per giveaway
  *
  * ✅ Admin Panel:
  *    - ➕ Create Codes (shows generated codes)
@@ -113,11 +113,7 @@ function mainMenuKeyboard($isAdmin = false) {
     [["text" => "🎁 Participate in Giveaway"]],
   ];
   if ($isAdmin) $kb[] = [["text" => "🛠 Admin Panel"]];
-  return [
-    "keyboard" => $kb,
-    "resize_keyboard" => true,
-    "is_persistent" => true
-  ];
+  return ["keyboard" => $kb, "resize_keyboard" => true, "is_persistent" => true];
 }
 
 function adminKeyboard() {
@@ -204,7 +200,7 @@ function getActiveGiveawayId() {
   return $row ? intval($row["id"]) : null;
 }
 
-// ✅ 8 chars: 5 letters + 3 numbers, shuffled
+// 8 chars: 5 letters + 3 numbers, shuffled
 function randomCode() {
   $letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
   $numbers = "23456789";
@@ -214,10 +210,10 @@ function randomCode() {
   return str_shuffle($code);
 }
 
-// ✅ Create codes: reusable until expiry, expires in 1 minute
+// Create codes: reusable until expiry, expires in 1 minute
 function createCodes($giveaway_id, $count) {
   global $pdo;
-  $count = max(1, min(200, intval($count))); // message safe
+  $count = max(1, min(200, intval($count)));
   $created = [];
 
   $stmt = $pdo->prepare("
@@ -237,7 +233,7 @@ function createCodes($giveaway_id, $count) {
   return $created;
 }
 
-// ✅ Unlimited-use code until expiry; user joins only once per giveaway
+// Unlimited-use code until expiry; user joins only once per giveaway
 function joinWithCode($tg_id, $tg_name, $code) {
   global $pdo;
   $gid = getActiveGiveawayId();
@@ -248,12 +244,7 @@ function joinWithCode($tg_id, $tg_name, $code) {
   if ($chk->fetch()) return ["ok" => false, "msg" => "✅ You already joined this giveaway."];
 
   // validate code
-  $stmt = $pdo->prepare("
-    SELECT expires_at
-    FROM giveaway_codes
-    WHERE giveaway_id=:gid AND code=:c
-    LIMIT 1
-  ");
+  $stmt = $pdo->prepare("SELECT expires_at FROM giveaway_codes WHERE giveaway_id=:gid AND code=:c LIMIT 1");
   $stmt->execute([":gid" => $gid, ":c" => $code]);
   $row = $stmt->fetch();
 
@@ -267,11 +258,8 @@ function joinWithCode($tg_id, $tg_name, $code) {
     return ["ok" => false, "msg" => "⏳ Code expired (valid only 1 minute). Ask admin for a new code."];
   }
 
-  // add participant
-  $ins = $pdo->prepare("
-    INSERT INTO giveaway_participants (giveaway_id, tg_id, tg_name)
-    VALUES (:gid, :tg, :nm)
-  ");
+  // insert participant
+  $ins = $pdo->prepare("INSERT INTO giveaway_participants (giveaway_id, tg_id, tg_name) VALUES (:gid, :tg, :nm)");
   $ins->execute([":gid" => $gid, ":tg" => $tg_id, ":nm" => $tg_name]);
 
   return ["ok" => true, "msg" => "✅ You are entered in the giveaway!"];
@@ -287,7 +275,8 @@ function getParticipantsCount($giveaway_id) {
 
 function getParticipants($giveaway_id, $limit = 50) {
   global $pdo;
-  $limit = max(1, min(500, intval($limit)));
+  $limit = max(1, min(200, intval($limit)));
+  // NOTE: LIMIT cannot be parameterized in PDO safely, so we clamp and inline.
   $stmt = $pdo->prepare("
     SELECT tg_id, tg_name
     FROM giveaway_participants
@@ -331,10 +320,7 @@ function setWinnersManual($giveaway_id, $picked) {
   $pdo->beginTransaction();
   try {
     $pdo->prepare("DELETE FROM giveaway_winners WHERE giveaway_id=:gid")->execute([":gid" => $giveaway_id]);
-    $ins = $pdo->prepare("
-      INSERT INTO giveaway_winners (giveaway_id, tg_id, tg_name)
-      VALUES (:gid, :tg, :nm)
-    ");
+    $ins = $pdo->prepare("INSERT INTO giveaway_winners (giveaway_id, tg_id, tg_name) VALUES (:gid, :tg, :nm)");
     foreach ($picked as $p) {
       $ins->execute([":gid" => $giveaway_id, ":tg" => $p["tg_id"], ":nm" => $p["tg_name"]]);
     }
@@ -420,7 +406,6 @@ if ($message) {
   $first   = trim($from["first_name"] ?? "");
   $username= trim($from["username"] ?? "");
   $tg_name = trim($first . ($username ? " (@$username)" : ""));
-
   $text    = trim($message["text"] ?? "");
   $isAdmin = ($tg_id === $ADMIN_ID);
 
@@ -444,10 +429,9 @@ if ($message) {
   if ($text === "🎁 Participate in Giveaway") {
     if (!requireJoinOrPrompt($chat_id, $tg_id, $isAdmin, false)) { echo "ok"; exit; }
     setState($tg_id, "await_code", "");
-    sendMessage($chat_id,
-      "🎁 Enter the <b>unique code</b> to participate in giveaway:\n\n" .
-      "⏳ Code expires in <b>1 minute</b>.\n" .
-      "✅ Same code can be used by many users until expiry."
+    sendMessage(
+      $chat_id,
+      "🎁 Enter the <b>unique code</b> to participate in giveaway:\n\n⏳ Code expires in <b>1 minute</b>.\n✅ Same code can be used by many users until expiry."
     );
     echo "ok"; exit;
   }
@@ -456,11 +440,7 @@ if ($message) {
   if ($isAdmin && $text === "➕ Create Codes") {
     $gid = getActiveGiveawayId();
     setState($tg_id, "admin_create_codes", (string)$gid);
-    sendMessage($chat_id,
-      "➕ How many codes to create? (1 - 200)\n\n" .
-      "⏳ Each code expires in 1 minute.\n" .
-      "✅ Same code can be used by many users until expiry."
-    );
+    sendMessage($chat_id, "➕ How many codes to create? (1 - 200)\n\n⏳ Each code expires in 1 minute.\n✅ Same code can be used by many users until expiry.");
     echo "ok"; exit;
   }
 
@@ -626,4 +606,66 @@ if ($message) {
       echo "ok"; exit;
     }
 
-    $ok = setWinnersManual($gid, $picked
+    $ok = setWinnersManual($gid, $picked);
+    clearState($tg_id);
+
+    if (!$ok) {
+      sendMessage($chat_id, "❌ Failed to save winners. Try again.", adminKeyboard());
+      echo "ok"; exit;
+    }
+
+    $out = "✅ <b>Manual winners saved</b>\n\n";
+    $i = 1;
+    foreach ($picked as $p) {
+      $out .= $i . ") " . htmlspecialchars($p["tg_name"]) . "\n";
+      $i++;
+    }
+    $out .= "\nNow tap: 📨 Send Prize Codes";
+
+    sendMessage($chat_id, $out, adminKeyboard());
+    echo "ok"; exit;
+  }
+
+  if ($isAdmin && $state === "admin_send_prizes") {
+    $gid = intval($st["payload"]);
+    $winners = getWinners($gid);
+    if (!$winners) {
+      clearState($tg_id);
+      sendMessage($chat_id, "❌ No winners exist. Choose winners again.", adminKeyboard());
+      echo "ok"; exit;
+    }
+
+    $lines = preg_split("/\r\n|\n|\r/", trim($text));
+    $prizes = [];
+    foreach ($lines as $ln) {
+      $c = trim($ln);
+      if ($c !== "") $prizes[] = $c;
+    }
+
+    if (count($prizes) < count($winners)) {
+      sendMessage($chat_id, "❌ You must send <b>" . count($winners) . "</b> prize codes (one per winner). Try again:");
+      echo "ok"; exit;
+    }
+
+    $sent = 0;
+    for ($i = 0; $i < count($winners); $i++) {
+      $tg = intval($winners[$i]["tg_id"]);
+      $prize = htmlspecialchars($prizes[$i]);
+      $msg = "🎉 Congratulations! You won the giveaway.\n\nYour prize code:\n<code>{$prize}</code>";
+      $r = sendMessage($tg, $msg);
+      if ($r && !empty($r["ok"])) $sent++;
+    }
+
+    clearState($tg_id);
+    resetGiveaway();
+
+    sendMessage($chat_id, "📨 Sent prize codes to <b>{$sent}</b> winners ✅\n\n🧹 Giveaway ended and reset.\nNow create new codes for next giveaway.", adminKeyboard());
+    echo "ok"; exit;
+  }
+
+  // Fallback
+  sendMessage($chat_id, "Use menu ✅", mainMenuKeyboard($isAdmin));
+  echo "ok"; exit;
+}
+
+echo "ok";
