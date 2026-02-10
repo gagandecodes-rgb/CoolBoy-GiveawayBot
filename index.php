@@ -218,7 +218,7 @@ function createCodes($giveaway_id, $count) {
 
   $stmt = $pdo->prepare("
     INSERT INTO giveaway_codes (giveaway_id, code, expires_at)
-    VALUES (:gid, :code, now() + interval '1 minute')
+    VALUES (:gid, :code, now() + interval '3 minute')
   ");
 
   while (count($created) < $count) {
@@ -255,7 +255,7 @@ function joinWithCode($tg_id, $tg_name, $code) {
   $expCheck->execute([":exp" => $row["expires_at"]]);
   $ex = $expCheck->fetch();
   if (!empty($ex) && !empty($ex["expired"])) {
-    return ["ok" => false, "msg" => "⏳ Code expired (valid only 1 minute). Ask admin for a new code."];
+    return ["ok" => false, "msg" => "⏳ Code expired (valid only 3 minute). Ask admin for a new code."];
   }
 
   // insert participant
@@ -431,7 +431,7 @@ if ($message) {
     setState($tg_id, "await_code", "");
     sendMessage(
       $chat_id,
-      "🎁 Enter the <b>unique code</b> to participate in giveaway:\n\n⏳ Code expires in <b>1 minute</b>.\n✅ Same code can be used by many users until expiry."
+      "🎁 Enter the <b>unique code</b> to participate in giveaway:\n\n⏳ Code expires in <b>3 minute</b>.\n✅ Same code can be used by many users until expiry."
     );
     echo "ok"; exit;
   }
@@ -440,7 +440,7 @@ if ($message) {
   if ($isAdmin && $text === "➕ Create Codes") {
     $gid = getActiveGiveawayId();
     setState($tg_id, "admin_create_codes", (string)$gid);
-    sendMessage($chat_id, "➕ How many codes to create? (1 - 200)\n\n⏳ Each code expires in 1 minute.\n✅ Same code can be used by many users until expiry.");
+    sendMessage($chat_id, "➕ How many codes to create? (1 - 200)\n\n⏳ Each code expires in 3 minute.\n✅ Same code can be used by many users until expiry.");
     echo "ok"; exit;
   }
 
@@ -533,7 +533,7 @@ if ($message) {
 
     $msg = "✅ <b>Generated Giveaway Codes</b>\n\n";
     foreach ($codes as $c) $msg .= "<code>{$c}</code>\n";
-    $msg .= "\n⏳ Each code expires in <b>1 minute</b>.\n✅ Same code can be used by many users until expiry.";
+    $msg .= "\n⏳ Each code expires in <b>3 minute</b>.\n✅ Same code can be used by many users until expiry.";
 
     sendMessage($chat_id, $msg, adminKeyboard());
     echo "ok"; exit;
